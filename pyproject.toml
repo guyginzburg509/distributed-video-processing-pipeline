@@ -1,0 +1,71 @@
+[project]
+name = "corsight-video-pipeline"
+version = "1.0.0"
+description = "Distributed video processing pipeline: VideoAnalyzer + StreamDetector"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["videos", "design"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "PTH",      # use pathlib
+    "RUF",
+]
+ignore = [
+    "B008",  # FastAPI Depends() in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The two provided boilerplate files are kept byte-identical to the brief.
+"stream_detector/detector.py" = ["ALL"]
+"stream_detector/detector_response_handling.py" = ["ALL"]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+exclude = ["^videos/", "^design/"]
+# `mypy .` covers the tests too -- they are part of the deliverable, and an
+# untyped fixture is exactly where a stale signature hides.
+files = ["pipeline_common", "video_analyzer", "stream_detector", "tests"]
+
+[[tool.mypy.overrides]]
+# The provided boilerplate is untyped in places; do not fail the build on it.
+module = ["stream_detector.detector", "stream_detector.detector_response_handling"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["cv2.*", "aio_pika.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# redis-py annotates its async client's returns as `Awaitable[T] | T`, because a
+# single class serves both sync and async callers. Every `await` against it is
+# therefore a false positive that no amount of correct code can satisfy.
+# Scoped to the one adapter module; the rest of the codebase stays strict.
+module = ["pipeline_common.adapters.redis_store"]
+disable_error_code = ["misc", "no-any-return", "no-untyped-call"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e: end-to-end test requiring a live `docker compose up` stack (deselected by default)",
+    "integration: requires live Redis/RabbitMQ; skipped automatically when unreachable",
+]
+addopts = "-m 'not e2e' --strict-markers -q"
+filterwarnings = ["error::DeprecationWarning"]

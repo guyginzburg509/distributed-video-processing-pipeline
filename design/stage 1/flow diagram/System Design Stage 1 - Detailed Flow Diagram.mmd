@@ -1,0 +1,58 @@
+flowchart TB
+    CL(["Client"])
+
+    subgraph VA["VideoAnalyzer :8000 — the HTTP request blocks across steps 1-28"]
+        direction TB
+        N2["2. Validate request<br/>schema · fps in 2,4 · path safety"]
+        N4["4. Probe video<br/>open · read source_fps · frame count"]
+        N6["6. Create job record<br/>status = RUNNING"]
+        N8["8. Decode thread<br/>grab() advances EVERY frame"]
+        N10{"10. Sampler:<br/>keep frame i?"}
+        N13["13. retrieve() + JPEG encode q=85<br/>paid only for kept frames"]
+        N15["15. Bounded asyncio.Queue<br/>&lt;&lt; BACKPRESSURE: blocks when full &gt;&gt;"]
+        N17["17. K publisher tasks"]
+        N25["25. await queue.join()<br/>ALL 279 frames confirmed"]
+        N27["27. Job status = COMPLETED"]
+    end
+
+    N19[("19. Redis<br/>frame blobs · job state")]
+    N21[["21. RabbitMQ<br/>frames.work.0 .. .N<br/>one ACTIVE consumer each"]]
+    N44[["44. frames.dlq"]]
+
+    subgraph SD["StreamDetector x N — runs AFTER the 200 has returned"]
+        direction TB
+        N30["30. Consumer<br/>prefetch=N · competing consumers"]
+        N32["32. GET blob · imdecode to ndarray"]
+        N34["34. detect_faces()<br/>provided mock, in executor"]
+        N36["36. Build RespObject<br/>faces · video_id · frame_id"]
+        N38["38. ResultBatcher<br/>buffer + delivery tags"]
+        N40["40. send_results_next_service(List)"]
+    end
+
+    CL -->|"1. POST /analyze"| N2
+    N2 -->|"3. valid"| N4
+    N4 -->|"5. source_fps = 25.0, 3488 frames"| N6
+    N6 -->|"7. start thread"| N8
+    N8 -->|"9. frame index i"| N10
+    N10 -->|"11. NO — skip, no decode cost (~96%)"| N8
+    N10 -->|"12. YES"| N13
+    N13 -->|"14. ~80 KB JPEG"| N15
+    N15 -->|"16. dequeue"| N17
+    N17 -->|"18. SET blob, TTL 1h"| N19
+    N17 -->|"20. publish 200 B FrameRef<br/>partition = sha256(video_id)"| N21
+    N21 -.->|"22. publisher CONFIRM"| N17
+    N17 -.->|"23. checkpoint every 50 confirmed"| N19
+    N17 -->|"24. last frame confirmed"| N25
+    N25 -->|"26. all durable in broker"| N27
+    N27 -->|"28. 200 OK — approx 20 s after step 1"| CL
+
+    N21 -->|"29. deliver in order, to that partition's ACTIVE consumer"| N30
+    N30 -->|"31. FrameRef blob_key"| N32
+    N19 -.->|"32. blob bytes"| N32
+    N32 -->|"33. ndarray 1280x720x3"| N34
+    N34 -->|"35. List of BoundingBox"| N36
+    N36 -->|"37. buffer it"| N38
+    N38 -->|"39. flush: 32 items OR 500 ms OR shutdown"| N40
+    N38 -.->|"41. ack delivery tags — ONLY after flush"| N21
+    N38 -.->|"42. HINCRBY frames_processed"| N19
+    N30 -.->|"43. nack, no requeue (blob gone / corrupt)"| N44

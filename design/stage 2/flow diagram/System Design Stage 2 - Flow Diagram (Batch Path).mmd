@@ -1,0 +1,32 @@
+---
+config:
+  theme: mc
+---
+flowchart LR
+    CL["Client"]
+    API["2. VideoAnalyzer · API<br/>stateless, 3 AZs — validate, register"]
+    PG[("Postgres HA<br/>job registry + work queue<br/>primary + sync standby")]
+    S3[("S3 video archive")]
+    DEC["6. VideoAnalyzer · Decoder workers — CPU<br/>segment-parallel, checkpointed"]
+    K[["9. Kafka frames.v1<br/>key = video_id · RF=3 · JPEG inline"]]
+    GPU["11. StreamDetector · GPU workers<br/>batched across streams"]
+    KR[["12. results.v1"]]
+    SINK["14. ResultSink"]
+    DLQ[["frames.dlq — bounded, replayable"]]
+
+    CL -->|"1. POST /jobs {s3_uri, fps}"| API
+    API -->|"3. INSERT job (PENDING)"| PG
+    API -->|"4. 202 Accepted + job_id<br/>connection closes in ~20 ms"| CL
+
+    PG -->|"5. claim + lease<br/>(FOR UPDATE SKIP LOCKED)"| DEC
+    S3 -->|"7. ranged GET, streamed —<br/>never a whole file on disk"| DEC
+    DEC -->|"8. produce, ordered per video"| K
+    DEC -.->|"10. checkpoint + heartbeat<br/>(resume after a crash)"| PG
+
+    K -->|"consumer group"| GPU
+    GPU -->|"detections"| KR
+    GPU -.->|"undecodable"| DLQ
+    KR -->|"13. consume in order per video"| SINK
+    SINK -->|"15. → next service"| OUT(["Downstream"])
+    SINK -.->|"16. mark COMPLETED"| PG
+    PG -.->|"17. webhook / GET /jobs/{id}"| CL

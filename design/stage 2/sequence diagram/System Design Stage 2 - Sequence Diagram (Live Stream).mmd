@@ -1,0 +1,33 @@
+---
+config:
+  theme: mc
+---
+sequenceDiagram
+    autonumber
+    participant CAM as Camera
+    participant I as StreamIngestor
+    participant K as Kafka frames.v1
+    participant G as StreamDetector · GPU
+    participant S as ResultSink
+
+    Note over CAM,S: Budget: 2.0 s from capture to result.<br/>Every hop below is measured against it.
+
+    CAM->>I: RTSP frame (sub-stream already at 4 fps)
+    Note over CAM,I: Sampling pushed to the camera:<br/>never decode 30 fps to keep 4.
+
+    I->>I: decode + JPEG                       ~8 ms
+    I->>K: produce (key = camera_id)           ~15 ms
+
+    G->>K: consume (one consumer per partition)
+    G->>G: dynamic batch across cameras        ~40 ms wait
+    G->>G: GPU inference                       ~120 ms
+    G->>S: publish detections                  ~15 ms
+
+    Note over CAM,S: ~200 ms of a 2000 ms budget — 10x headroom.
+
+    alt frame arrives older than the budget
+        G->>G: SHED — ack and drop, increment stale counter
+        Note over G: A late answer has little value, and processing it<br/>starves the frame that is still current, so a<br/>backlog would compound instead of draining.
+    end
+
+    Note over I,G: No consumer acks on this path.<br/>Redelivering a stale frame only produces work<br/>the freshness check discards.

@@ -1,0 +1,128 @@
+# Full environment: both services plus the auxiliary infrastructure.
+#
+#   docker compose up --build
+#   docker compose up -d --scale stream_detector=4     # competing consumers
+#
+# Both images build from the repo root so the shared `pipeline_common` package
+# is reachable from each.
+
+name: corsight-video-pipeline
+
+x-infra-env: &infra-env
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  REDIS_URL: redis://redis:6379/0
+  WORK_QUEUE: frames.work
+  DLQ_QUEUE: frames.dlq
+  # Videos hash to partitions, and each partition has a single active consumer.
+  # That is what gives ordered delivery per video, and it caps how many videos
+  # run in parallel -- raise it alongside detector replicas.
+  # BOTH services must agree on this number.
+  FRAME_PARTITIONS: "4"
+  # End-to-end latency budget for a live deployment.
+  MAX_LATENCY_SEC: "2.0"
+  LOG_LEVEL: INFO
+  LOG_JSON: "true"
+
+x-ca-build-arg: &ca-build-arg
+  # Set EXTRA_CA_BUNDLE to a filename inside docker/ca/ when building behind a
+  # TLS-inspecting proxy or antivirus. Empty everywhere else.
+  EXTRA_CA_BUNDLE: ${EXTRA_CA_BUNDLE:-}
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI (guest/guest) -- watch consumers compete
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # noeviction is Redis's default, but it is pinned explicitly because it
+    # matters: under `allkeys-lru` Redis would silently evict frame blobs when
+    # memory filled, producing frames that dead-letter for no visible reason.
+    # Failing the write loudly is far easier to diagnose.
+    command: >
+      redis-server
+      --maxmemory 1gb
+      --maxmemory-policy noeviction
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  video_analyzer:
+    build:
+      context: .
+      dockerfile: video_analyzer/Dockerfile
+      args: *ca-build-arg
+    environment:
+      <<: *infra-env
+      VIDEO_ROOT: /data/videos
+      JPEG_QUALITY: "85"
+      ANALYZER_QUEUE_SIZE: "256"
+      ANALYZER_PUBLISHERS: "4"
+      FRAME_BLOB_TTL_SEC: "3600"
+      CHECKPOINT_EVERY: "50"
+      MAX_FRAME_FAILURE_RATIO: "0.05"
+      MAX_CONCURRENT_JOBS: "4"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Read-only: the analyzer never writes to the source library.
+      - ./videos:/data/videos:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  stream_detector:
+    build:
+      context: .
+      dockerfile: stream_detector/Dockerfile
+      args: *ca-build-arg
+    environment:
+      <<: *infra-env
+      DETECTOR_PREFETCH: "32"
+      BATCH_MAX_SIZE: "32"
+      BATCH_MAX_LATENCY_MS: "500"
+      DETECTOR_EXECUTOR_WORKERS: "4"
+      DEDUP_TTL_SEC: "3600"
+      # 0 = never shed, which is correct for archive processing of a file where
+      # completeness beats latency. For a live camera set this to
+      # MAX_LATENCY_SEC: a stale answer has little value, and processing it
+      # starves the frame that is still current, so a backlog compounds.
+      MAX_FRAME_AGE_SEC: "0"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    # Give the batcher time to flush its tail on SIGTERM before SIGKILL.
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+volumes:
+  rabbitmq-data:
+  redis-data:

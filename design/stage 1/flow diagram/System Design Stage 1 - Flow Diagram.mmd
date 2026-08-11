@@ -1,0 +1,26 @@
+---
+config:
+  theme: mc
+---
+flowchart LR
+    C[Client] -->|"1. POST /analyze"| VA
+
+    subgraph VA[VideoAnalyzer :8000]
+        API["2. FastAPI + validation"] --> SVC["3. AnalysisService"]
+        SVC --> DEC["4. decode thread<br/>grab/retrieve + JPEG"]
+        DEC -->|"5. bounded asyncio.Queue<br/>BACKPRESSURE"| PUB["6. K publisher tasks"]
+    end
+
+    PUB -->|"7. SET blob, TTL"| R[("Redis<br/>frame blobs + job state")]
+    PUB -->|"8. publish ~200B ref<br/>partition = sha256(video_id)<br/>await PUBLISHER CONFIRM"| MQ[["RabbitMQ<br/>frames.work.0 .. .N<br/>one ACTIVE consumer each"]]
+    PUB -->|"9. 200 OK — only after ALL confirms"| C
+
+    MQ -->|"10. in order per video<br/>prefetch, manual ack"| SD1["StreamDetector #1<br/>active on some partitions"]
+    MQ --> SD2["StreamDetector #2<br/>active on the others"]
+    MQ -.->|"standby — promoted if an active consumer dies"| SDN["StreamDetector #N"]
+
+    R -.->|"11. GET blob"| SD1
+    SD1 --> DET["12. detect_faces"] --> BATCH["13. ResultBatcher<br/>size OR time flush"]
+    BATCH --> NEXT["14. send_results_next_service"]
+    BATCH -.->|"15. CONSUMER ACK (detector to broker)<br/>batch's delivery tags, after flush"| MQ
+    MQ -.->|"16. nack, no requeue"| DLQ[["frames.dlq<br/>bounded 10k / 24h"]]

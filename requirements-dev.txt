@@ -1,0 +1,11 @@
+# Local development / test dependencies.
+# The suite runs green with NO Docker and NO broker -- see tests/contract for why.
+-r video_analyzer/requirements.txt
+-r stream_detector/requirements.txt
+
+pytest==8.3.4
+pytest-asyncio==0.25.2
+pytest-cov==6.0.0
+httpx==0.28.1
+ruff==0.9.4
+mypy==1.14.1

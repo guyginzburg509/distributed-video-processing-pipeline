@@ -1,0 +1,29 @@
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as VideoAnalyzer
+    participant DT as Decode thread
+    participant R as Redis
+    participant MQ as RabbitMQ
+    participant D as StreamDetector
+
+    C->>A: POST /analyze  (connection held open)
+    A->>A: validate + probe (25 fps, 3488 frames)
+    A->>DT: start decode thread
+
+    loop 279 kept frames
+        DT->>DT: grab x12/13, retrieve x1, JPEG
+        DT->>A: queue.put()  (blocks if queue full)
+        A->>R: SET blob (TTL 1h)
+        A->>MQ: publish FrameRef to partition sha256(video_id)
+        MQ-->>A: publisher CONFIRM
+    end
+
+    Note over A: await queue.join()<br/>THIS is the wait.<br/>All 279 confirmed durable.
+    A-->>C: 200 OK  (2.2s measured, 62.9x real-time)
+
+    Note over C,D: Request already returned.<br/>Detection happens afterwards.
+    MQ->>D: deliver to the ONE active consumer<br/>for that partition (in order)
+    D->>R: GET blob
+    D->>D: detect_faces
+    D->>MQ: ack (after batch flush)

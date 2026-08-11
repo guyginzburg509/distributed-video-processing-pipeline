@@ -1,0 +1,21 @@
+# Keep the 129 MB video out of the build context entirely -- it is bind-mounted
+# read-only at runtime, never baked into an image.
+videos/
+
+design/
+tests/
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+*.md
+*.pdf
+*.docx
+.DS_Store
