@@ -1,0 +1,10 @@
+fastapi==0.115.7
+uvicorn[standard]==0.34.0
+pydantic==2.10.6
+pydantic-settings==2.7.1
+# headless: no GUI libs -> smaller image and no libGL.so.1 crash in containers
+opencv-python-headless==4.11.0.86
+numpy==2.2.2
+redis==5.2.1
+aio-pika==9.5.4
+structlog==25.1.0
