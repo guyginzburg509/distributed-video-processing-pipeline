@@ -1,0 +1,38 @@
+---
+config:
+  theme: mc
+---
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as Control Plane API
+    participant PG as Postgres
+    participant D as VideoAnalyzer · Decoder
+    participant K as Kafka frames.v1
+    participant G as StreamDetector · GPU
+    participant S as ResultSink
+
+    C->>API: POST /jobs {s3_uri, fps}
+    API->>API: validate (fps, path, tenant quota)
+    API->>PG: INSERT job (PENDING)
+    API-->>C: 202 Accepted {job_id}
+    Note over C,API: Connection closes in ~20 ms.<br/>Stage 1 held it open for the entire job —<br/>the change that unlocks hundreds concurrently.
+
+    D->>PG: claim job (FOR UPDATE SKIP LOCKED) + take lease
+    loop every kept frame
+        D->>D: ranged GET from S3, decode, sample, JPEG
+        D->>K: produce (key = video_id, JPEG inline)
+    end
+    D->>PG: checkpoint + heartbeat (every N confirmed frames)
+
+    G->>K: consume (one consumer per partition)
+    G->>G: batch across streams, infer on GPU
+    G->>S: publish detections (ordered per video)
+    S->>PG: mark COMPLETED
+
+    par Push
+        API-->>C: webhook {job_id, COMPLETED}
+    and Or pull
+        C->>API: GET /jobs/{job_id}
+        API-->>C: {status, frames_processed, ...}
+    end
